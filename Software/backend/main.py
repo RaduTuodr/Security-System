@@ -7,9 +7,6 @@ from fastapi.responses import JSONResponse
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 
-
-
-
 # 1) Update this to match your Arduino's serial port
 #    e.g., "COM3" on Windows, or "/dev/ttyACM0" on Linux
 SERIAL_PORT = "COM8"
@@ -22,12 +19,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # A global dictionary to hold the Arduino status
 machineState = {
-    "machineEnabled": False,   # True if "MACHINE ENABLED!"
-    "beamBroken": False,       # True if we see "Beam Broken!"
-    "lastKeyPressed": None     # e.g. "1", "2", "3"...
+    "machineEnabled": False,  # True if "MACHINE ENABLED!"
+    "beamBroken": False,  # True if we see "Beam Broken!"
+    "lastKeys": [1, 2, 3]  # Rolling buffer of the last 4 keys pressed
 }
+
+lock = threading.Lock()  # Lock to prevent race conditions when accessing machineState
+
 
 def read_from_arduino():
     """
@@ -36,47 +37,59 @@ def read_from_arduino():
     """
     try:
         # Open the serial connection
-        ser = serial.Serial(SERIAL_PORT, 9600, timeout=1)
+        # ser = serial.Serial(SERIAL_PORT, 9600, timeout=1)
         time.sleep(2)  # give it a moment to initialize
     except Exception as e:
         print(f"ERROR: Could not open serial port {SERIAL_PORT}: {e}")
         return
 
     while True:
-        line = ser.readline().decode("utf-8").strip()
+        # line = ser.readline().decode("utf-8").strip()
+        line = "SOMETHING GIVEN BY THE SERIAL PORT"
         if line:
             print("[Arduino]", line)  # for debugging
 
-            # 1) Machine enabled/disabled
-            if "MACHINE ENABLED!" in line:
-                machineState["machineEnabled"] = True
-            elif "MACHINE DISABLED!" in line:
-                machineState["machineEnabled"] = False
+            with lock:
+                # 1) Machine enabled/disabled
+                if "MACHINE ENABLED!" in line:
+                    machineState["machineEnabled"] = True
+                elif "MACHINE DISABLED!" in line:
+                    machineState["machineEnabled"] = False
 
-            # 2) Beam broken
-            elif "Beam Broken!" in line:
-                machineState["beamBroken"] = True
-            # If you want to clear beamBroken back to False
-            # when the beam is restored, you'd need the Arduino to print
-            # something like "Beam Restored!". Then you could:
-            # elif "Beam Restored!" in line:
-            #     machineState["beamBroken"] = False
+                # 2) Beam broken
+                elif "Beam Broken!" in line:
+                    machineState["beamBroken"] = True
+                elif "Beam Restored!" in line:  # Optional: Reset beam status
+                    machineState["beamBroken"] = False
 
-            # 3) Key pressed
-            elif "Key Pressed:" in line:
-                parts = line.split(":")
-                if len(parts) == 2:
-                    key = parts[1].strip()
-                    machineState["lastKeyPressed"] = key
+                # 3) Key pressed
+                elif "Key Pressed:" in line:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        key = parts[1].strip()
 
-        time.sleep(0.05)  # small delay
+                        # Add key to the rolling buffer
+                        machineState["lastKeys"].append(key)
+                        if len(machineState["lastKeys"]) > 4:
+                            machineState["lastKeys"].pop(0)  # Keep only last 4
+
+        time.sleep(2)  # small delay
+
 
 @app.get("/status")
 def get_status():
     """
     GET endpoint for the React frontend to retrieve the machine state.
     """
-    return JSONResponse(content=machineState)
+    with lock:
+        # Construct a response with the relevant information
+        response = {
+            "machineEnabled": machineState["machineEnabled"],
+            "beamBroken": machineState["beamBroken"],
+            "lastKeys": machineState["lastKeys"]
+        }
+    return JSONResponse(content=response)
+
 
 if __name__ == "__main__":
     # Start a separate thread to read from the Arduino
